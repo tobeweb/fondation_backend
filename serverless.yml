@@ -1,0 +1,142 @@
+service: fondation-back
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: eu-west-1
+  stage: ${opt:stage, 'dev'}
+  environment:
+    STAGE: ${self:provider.stage}
+    DB_HOST: ${ssm:/fondation/${self:provider.stage}/db/host}
+    DB_NAME: ${ssm:/fondation/${self:provider.stage}/db/name}
+    DB_USER: ${ssm:/fondation/${self:provider.stage}/db/user}
+    DB_PORT: ${ssm:/fondation/${self:provider.stage}/db/port}
+    COGNITO_USER_POOL_ID: ${ssm:/fondation/${self:provider.stage}/cognito/userPoolId}
+    COGNITO_APP_CLIENT_ID: ${ssm:/fondation/${self:provider.stage}/cognito/appClientId}
+
+plugins:
+  - serverless-python-requirements
+  - serverless-offline
+
+# Enable Serverless Framework's built-in dotenv support (v3+)
+useDotenv: true
+
+custom:
+  pythonRequirements:
+    dockerizePip: true
+    slim: true
+  # Dotenv settings handled by built-in support now
+  stages:
+    - dev
+    - prod
+
+package:
+  patterns:
+    - '!tests/**'
+    - '!**/*.pyc'
+
+functions:
+  # -------- Clients ---------
+  createClient:
+    handler: src/clients/handler.create_client
+    events:
+      - http:
+          path: client
+          method: post
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            userPoolIds:
+              - ${ssm:/fondation/${self:provider.stage}/cognito/userPoolId}
+  getClient:
+    handler: src/clients/handler.get_client
+    events:
+      - http:
+          path: client/{clientId}
+          method: get
+          request:
+            parameters:
+              paths:
+                clientId: true
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            userPoolIds:
+              - ${ssm:/fondation/${self:provider.stage}/cognito/userPoolId}
+
+  # -------- Queue ----------
+  addToQueue:
+    handler: src/queue/handler.add_to_queue
+    events:
+      - http:
+          path: queue
+          method: post
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            userPoolIds:
+              - ${ssm:/fondation/${self:provider.stage}/cognito/userPoolId}
+  nextInQueue:
+    handler: src/queue/handler.next_in_queue
+    events:
+      - http:
+          path: queue/next
+          method: get
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            userPoolIds:
+              - ${ssm:/fondation/${self:provider.stage}/cognito/userPoolId}
+
+  # -------- Orders ---------
+  createOrder:
+    handler: src/orders/handler.create_order
+    events:
+      - http:
+          path: order
+          method: post
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            userPoolIds:
+              - ${ssm:/fondation/${self:provider.stage}/cognito/userPoolId}
+
+resources:
+  Resources:
+    FondationDBCluster:
+      Type: AWS::RDS::DBCluster
+      Properties:
+        Engine: aurora-mysql
+        EngineMode: serverless
+        DBClusterIdentifier: ${self:service}-${self:provider.stage}-cluster
+        MasterUsername: admin
+        MasterUserPassword: ${ssm:/fondation/${self:provider.stage}/db/password}
+        ScalingConfiguration:
+          AutoPause: true
+          MinCapacity: 2
+          MaxCapacity: 8
+          SecondsUntilAutoPause: 300
+        EnableHttpEndpoint: true
+    FondationDBInstance:
+      Type: AWS::RDS::DBInstance
+      Properties:
+        DBClusterIdentifier: !Ref FondationDBCluster
+        DBInstanceClass: db.serverless
+        Engine: aurora-mysql
+        PubliclyAccessible: false
+    ServerlessSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow Lambda access to Aurora
+        VpcId: ${ssm:/fondation/network/vpcId}
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 3306
+            ToPort: 3306
+            SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+    LambdaSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Lambda SG to access Aurora
+        VpcId: ${ssm:/fondation/network/vpcId} 
